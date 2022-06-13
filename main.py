@@ -29,6 +29,14 @@ env = ss.frame_stack_v1(env, 3)
 
 print ( "Yeahh" )
 env.reset()
+
+## The environment dictates the number of agents we get and what abilities they have
+##env.action_space(agent).shape:
+#env.reset()
+#for i,a in enumerate(env.agents):
+#  print( i, env.action_space(a).shape )
+#  print( i, env.observation_space(a).shape )
+
 for agent in env.agent_iter():
 
   observation, reward, done, info = env.last()

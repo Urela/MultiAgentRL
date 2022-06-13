@@ -31,15 +31,21 @@ class ReplayBuffer:
 class Actor(nn.Module):
   def __init__(self, in_dims, out_dims, lr=5e-4):
     super(Actor, self).__init__()
-    self.fc1 = nn.Linear(in_dims, 128)
-    self.fc2 = nn.Linear(128, 64)
-    self.fc3 = nn.Linear(64, out_dims)
+    self.net = nn.Sequential(
+      self.layer_init(nn.Conv2d(4,  32, 8, stride=4)), nn.ReLU(),
+      self.layer_init(nn.Conv2d(32, 64, 4, stride=2)), nn.ReLU(),
+      self.layer_init(nn.Conv2d(64, 64, 3, stride=1)), nn.ReLU(),
+      nn.Flatten(),
+
+      self.layer_init(nn.Linear(64 * 7 * 7, 512)), nn.ReLU(),
+      self.layer_init(nn.Linear(512, out_space.n), std=0.01),
+    )
+
     self.optimizer = optim.Adam(self.parameters(), lr=lr)
+    self.to('cpu')
 
   def forward(self, x):
-    x = F.relu(self.fc1(x))
-    x = F.relu(self.fc2(x))
-    x = torch.tanh(self.fc3(x))
+    x = self.net(x )
     return x
 
 class Critic(nn.Module):
@@ -120,39 +126,57 @@ class DDPG():
       param_targ.data.copy_(param_targ.data * (1.0 - tau) + param.data * tau)
 
 
-env = gym.make('Pendulum-v1')
-env = gym.wrappers.RecordEpisodeStatistics(env)
-agent = DDPG(env.observation_space.shape[0], env.action_space.shape[0])
-
-score = 0.0
-print_interval = 1
 
 
-scores = []
-for epi in range(100):
-  obs = env.reset()
-  while True:
+import supersuit as ss
+from pettingzoo.butterfly import pistonball_v6
 
-    action = agent.get_action(obs)
-    _obs, reward, done, info = env.step([action])
-    agent.store((obs,action,reward,_obs,done))
-    score +=reward
-    obs = _obs
-    agent.train()
-  
-    if "episode" in info.keys():
-      scores.append(info['episode']['r'])
-      #avg_scores = np.mean(scores[-100:]) # moving average of last 100 episodes
-      print(f"Episode {epi}, Return: {info['episode']['r']}")
-      break
+NUM_AGENTS = 20
 
-  
-env.close()
+env = pistonball_v6.parallel_env(
+    n_pistons = NUM_AGENTS,
+    time_penalty=-0.1,
+    continuous=True,
+    random_drop=True,
+    random_rotate=True,
+    ball_mass=0.75,
+    ball_friction=0.3,
+    ball_elasticity=1.5,
+    max_cycles=125,
+)
+env = ss.color_reduction_v0(env, mode="B")
+env = ss.resize_v1(env, x_size=84, y_size=84)
+env = ss.frame_stack_v1(env, 3)
+env = ss.pettingzoo_env_to_vec_env_v1(env)
+env = ss.concat_vec_envs_v1(env, 8, num_cpus=4, base_class="stable_baselines3")
 
-y = scores 
-x = np.arange(len(y))
+### HELP ME PLEASE
+#agent =  MADDPG( in_dims, out_dims, NUM_AGENTS)
+#agent = DDPG(env.observation_space.shape[0], env.action_space.shape[0])
 
-from bokeh.plotting import figure, show
-p = figure(title="TODO", x_axis_label="Episodes", y_axis_label="Scores")
-p.line(x, y,  legend_label="Scores", line_color="blue", line_width=2)
-show(p) 
+# Preprocesssing
+print( 'setting world')
+env = pistonball_v6.env()
+env = ss.color_reduction_v0(env, mode="B")
+env = ss.resize_v1(env, x_size=84, y_size=84)
+env = ss.frame_stack_v1(env, 1)
+
+# The environment dictates the number of agents we get
+#env.action_space(agent).shape:
+env.reset()
+for i,a in enumerate(env.agents):
+  print( i, env.action_space(a).shape )
+  print( i, env.observation_space(a).shape )
+
+#print ( "Yeahh" )
+#env.reset()
+#for agent in env.agent_iter():
+#
+#  observation, reward, done, info = env.last()
+#  action = np.random.uniform(low=-1, high=1, size=1) # random policy for every agent
+#  #print( observation.shape )
+#
+#  #print(agent, action)
+#  env.step(action)
+#  env.render()
+#env.close()
