@@ -93,23 +93,23 @@ class MADDPG():
       if(len(self.agent_memorys[a]) >= 2000):
         print("learning")
         states, actions, rewards, nstates, dones = self.agent_memorys[a].sample(32)
-        print( states.shape, actions.shape)
+        print(i, states.shape, actions.shape)
         # RuntimeError: mat1 and mat2 shapes cannot be multiplied (32x9 and 13x128)
         q = self.agents[a].critic(states, actions)
-        a_targ = self.agents[a].targ_actor(nstates)
-        q_targ = self.agents[a].targ_critic(nstates, a_targ)
-        q_targ = rewards + gamma*q_targ * dones
-        critic_loss = F.smooth_l1_loss(q, q_targ.detach() )
+        #a_targ = self.agents[a].targ_actor(nstates)
+        #q_targ = self.agents[a].targ_critic(nstates, a_targ)
+        #q_targ = rewards + gamma*q_targ * dones
+        #critic_loss = F.smooth_l1_loss(q, q_targ.detach() )
 
-        self.agents[a].critic.optimizer.zero_grad()
-        critic_loss.backward()
-        self.agents[a].critic.optimizer.step()
+        #self.agents[a].critic.optimizer.zero_grad()
+        #critic_loss.backward()
+        #self.agents[a].critic.optimizer.step()
 
-        a_pred = agent.actor(states)
-        actor_loss = self.agents[a].critic(states, a_pred).mean()
-        self.agents[a].actor.optimizer.zero_grad()
-        actor_loss.backward()
-        self.agents[a].actor.optimizer.step()
+        #a_pred = agent.actor(states)
+        #actor_loss = self.agents[a].critic(states, a_pred).mean()
+        #self.agents[a].actor.optimizer.zero_grad()
+        #actor_loss.backward()
+        #self.agents[a].actor.optimizer.step()
 
     #self.update_targets()
 
