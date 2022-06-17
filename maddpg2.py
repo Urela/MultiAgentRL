@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+gamma = 0.99
 class ReplayBuffer():
   def __init__(self, size=50000):
     self.memory = collections.deque(maxlen=size)
@@ -21,7 +22,7 @@ class ReplayBuffer():
   def sample(self, batch_size):
     batch = random.sample(self.memory, batch_size)
     states  = torch.tensor([x[0] for x in batch], dtype=torch.float)
-    actions = torch.tensor([[x[1]] for x in batch]).float()
+    actions = torch.tensor([x[1] for x in batch]).float()
     rewards = torch.tensor([[x[2]] for x in batch]).float()
     nstates = torch.tensor([x[3] for x in batch], dtype=torch.float)
     dones   = torch.tensor([1-x[4] for x in batch])
@@ -42,9 +43,9 @@ class Actor(nn.Module):
     return x
 
 class Critic(nn.Module):
-  def __init__(self, in_dims, out_dims, lr=1e-3):
+  def __init__(self, in_dims, lr=1e-3):
     super(Critic, self).__init__()
-    self.fc1 = nn.Linear(in_dims+out_dims, 128)
+    self.fc1 = nn.Linear(in_dims, 128)
     self.fc2 = nn.Linear(128, 32)
     self.fc3 = nn.Linear(32, 1)
     self.optimizer = optim.Adam(self.parameters(), lr=lr)
@@ -57,12 +58,12 @@ class Critic(nn.Module):
     return x
 
 class DDPG_Agent():
-  def __init__(self, in_dims, out_dims):
+  def __init__(self, in_dims, out_dims, critic_in):
     #self.memory = ReplayBuffer()
     self.actor  = Actor(in_dims,  out_dims).to('cpu')
-    self.critic = Critic(in_dims, out_dims).to('cpu')
+    self.critic = Critic(critic_in).to('cpu')
     self.targ_actor  = Actor(in_dims,  out_dims).to('cpu') # target critic
-    self.targ_critic = Critic(in_dims, out_dims).to('cpu') # target actor
+    self.targ_critic = Critic(critic_in).to('cpu') # target actor
 
     # intialize the targets to match their networks
     self.targ_critic.load_state_dict(self.critic.state_dict())
@@ -73,10 +74,11 @@ class MADDPG():
     self.main_memory = ReplayBuffer()
     self.agents = {}
     self.agent_memorys = {}
+    #critic_in = sum(env.observation_space(a).shape[0]+env.action_space(a).n for a in env.agents) # gloabal obs+action
     for a in env.agents:
       in_dims  = env.observation_space(a).shape[0] 
       out_dims = env.action_space(a).n 
-      self.agents[a] = DDPG_Agent(in_dims, out_dims)
+      self.agents[a] = DDPG_Agent(in_dims, out_dims, in_dims+out_dims)
       self.agent_memorys[a] = ReplayBuffer()
 
   def get_action(self, obs):
@@ -91,21 +93,28 @@ class MADDPG():
   def train(self):
     for i, a in enumerate(self.agents):  
       if(len(self.agent_memorys[a]) >= 2000):
-        print("learning")
+        #print("learning")
         states, actions, rewards, nstates, dones = self.agent_memorys[a].sample(32)
-        print(i, states.shape, actions.shape)
+        #print(type(states), type(actions))
+
         # RuntimeError: mat1 and mat2 shapes cannot be multiplied (32x9 and 13x128)
+        #q = self.agents[a].critic(list(states.values()), list(actions.values()))
+        #print("world state",torch.cat([states, actions],dim=1).shape)
+
+        #print( torch.cat([states, actions], dim=1).shape, states.shape, actions.shape )
+
         q = self.agents[a].critic(states, actions)
-        #a_targ = self.agents[a].targ_actor(nstates)
-        #q_targ = self.agents[a].targ_critic(nstates, a_targ)
-        #q_targ = rewards + gamma*q_targ * dones
-        #critic_loss = F.smooth_l1_loss(q, q_targ.detach() )
+        #q = self.agents[a].critic(states, actions)
+        a_targ = self.agents[a].targ_actor(nstates)
+        q_targ = self.agents[a].targ_critic(nstates, a_targ)
+        q_targ = rewards + gamma*q_targ * dones
+        critic_loss = F.smooth_l1_loss(q, q_targ.detach() )
 
-        #self.agents[a].critic.optimizer.zero_grad()
-        #critic_loss.backward()
-        #self.agents[a].critic.optimizer.step()
+        self.agents[a].critic.optimizer.zero_grad()
+        critic_loss.backward()
+        self.agents[a].critic.optimizer.step()
 
-        #a_pred = agent.actor(states)
+        #a_pred = self.agents.actor(states)
         #actor_loss = self.agents[a].critic(states, a_pred).mean()
         #self.agents[a].actor.optimizer.zero_grad()
         #actor_loss.backward()
@@ -142,15 +151,16 @@ for episode in range(episode_num):
   agent_score = {a: 0 for a in env.agents} # agent reward of the current episode
   while env.agents:  
     steps += 1
-    #actions = {a: env.action_space(a).sample() for a in env.agents}
+    #action = {a: env.action_space(a).sample() for a in env.agents}
     action = AGENT.get_action(obs) 
     next_obs, reward, done, info = env.step(action)
     for agent_id in obs.keys():
       _state  = obs[agent_id]
-      _action = action[agent_id]
       _reward = reward[agent_id]
       _nstate = next_obs[agent_id]
       _done   = done[agent_id]
+      _action = np.zeros(env.action_space(agent_id).n)
+      _action [action[agent_id]] = 1  # convert action to one-hot encoding
       AGENT.agent_memorys[agent_id].store((_state, _action, _reward, _nstate, _done))
 
     obs = next_obs
