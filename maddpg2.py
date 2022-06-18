@@ -33,30 +33,58 @@ class ReplayBuffer():
 class Actor(nn.Module):
   def __init__(self, in_dims, out_dims, lr=5e-4):
     super(Actor, self).__init__()
-    self.fc1 = nn.Linear(in_dims, 64)
-    self.fc2 = nn.Linear(64, 64)
-    self.fc3 = nn.Linear(64, out_dims)
+    #self.fc1 = nn.Linear(in_dims, 64)
+    #self.fc2 = nn.Linear(64, 64)
+    #self.fc3 = nn.Linear(64, out_dims)
+    self.net = nn.Sequential(
+        nn.Linear(in_dims, 64), nn.ReLU(),
+        nn.Linear(64, 64),      nn.ReLU(),
+        nn.Linear(64, out_dims),
+    ).apply(self.init)
     self.optimizer = optim.Adam(self.parameters(), lr=lr)
 
+  @staticmethod
+  def init(m):
+    """init parameter of the module"""
+    gain = nn.init.calculate_gain('relu')
+    if isinstance(m, nn.Linear):
+      torch.nn.init.xavier_uniform_(m.weight, gain=gain)
+      m.bias.data.fill_(0.01)
+
   def forward(self, x):
-    x = F.relu(self.fc1(x))
-    x = F.relu(self.fc2(x))
-    x = torch.tanh(self.fc3(x))
+    #x = F.relu(self.fc1(x))
+    #x = F.relu(self.fc2(x))
+    #x = torch.tanh(self.fc3(x))
+    x = self.net(x)
     return x
 
 class Critic(nn.Module):
   def __init__(self, in_dims, lr=1e-3):
     super(Critic, self).__init__()
-    self.fc1 = nn.Linear(in_dims, 128)
-    self.fc2 = nn.Linear(128, 32)
-    self.fc3 = nn.Linear(32, 1)
+    self.fc1 = nn.Linear(in_dims, 64)
+    self.fc2 = nn.Linear(64, 64)
+    self.fc3 = nn.Linear(64, 1)
+    self.net = nn.Sequential(
+        nn.Linear(in_dims, 64), nn.ReLU(),
+        nn.Linear(64, 64),      nn.ReLU(),
+        nn.Linear(64, 1),
+    ).apply(self.init)
     self.optimizer = optim.Adam(self.parameters(), lr=lr)
+
+  @staticmethod
+  def init(m):
+    """init parameter of the module"""
+    gain = nn.init.calculate_gain('relu')
+    if isinstance(m, nn.Linear):
+      torch.nn.init.xavier_uniform_(m.weight, gain=gain)
+      m.bias.data.fill_(0.01)
 
   def forward(self, o, a):
     x = torch.cat([o, a], dim=1)
-    x = F.relu(self.fc1(x))
-    x = F.relu(self.fc2(x))
-    x = self.fc3(x)
+    #x = F.relu(self.fc1(x))
+    #x = F.relu(self.fc2(x))
+    #x = self.fc3(x)
+    x = self.net(x)
     return x
 
 class DDPG_Agent():
@@ -98,25 +126,27 @@ class MADDPG():
         #print("learning")
         states, actions, rewards, nstates, dones = self.agent_memorys[a].sample(32)
 
-        # RuntimeError: mat1 and mat2 shapes cannot be multiplied (32x9 and 13x128)
-        #q = self.agents[a].critic(list(states.values()), list(actions.values()))
-        #print("world state",torch.cat([states, actions],dim=1).shape)
-        #print( torch.cat([states, actions], dim=1).shape, states.shape, actions.shape )
-
         q = self.agents[a].critic(states, actions)
         a_targ = self.agents[a].targ_actor(nstates)
-        q_targ = self.agents[a].targ_critic(nstates, a_targ)
-        #print((rewards + gamma*q_targ * dones).shape, (gamma*q_targ*dones).shape, (q_targ*dones).shape, q_targ.shape)
-        q_targ = rewards + gamma*q_targ * dones
+        #a_targ = F.gumbel_softmax(a_targ, hard=True)  ##?????
 
-        critic_loss = F.smooth_l1_loss(q, q_targ.detach() )
+        q_targ = self.agents[a].targ_critic(nstates, a_targ)
+        q_targ = rewards + gamma*q_targ * dones
+        critic_loss = F.smooth_l1_loss(q, q_targ, reduction='mean')
 
         self.agents[a].critic.optimizer.zero_grad()
         critic_loss.backward()
         self.agents[a].critic.optimizer.step()
 
         a_pred = self.agents[a].actor(states)
-        actor_loss = self.agents[a].critic(states, a_pred).mean()
+        actor_loss = -self.agents[a].critic(states, a_pred).mean()
+
+        #out = self.agents[a].actor(states)
+        #a_pred = F.gumbel_softmax(out, hard=True)  ##?????
+        #actor_loss = -self.agents[a].critic(states, a_pred).mean()
+        #actor_loss_pse = torch.pow(out, 2).mean()   #?????
+        #actor_loss = (actor_loss + 1e-3 * actor_loss_pse) #???
+
         self.agents[a].actor.optimizer.zero_grad()
         actor_loss.backward()
         self.agents[a].actor.optimizer.step()
@@ -142,8 +172,7 @@ env.reset()
 AGENT = MADDPG(env)
 
 #episode_num = 30000
-episode_num = 10000
-episode_num = 10000
+episode_num = 3000
 num_agents = env.num_agents
 print( num_agents, "number of agents")
 scores = {agent: np.zeros(episode_num) for agent in env.agents} # reward of each episode of each agent
@@ -184,6 +213,7 @@ for episode in range(episode_num):
   for a, r in agent_score.items():  # record reward
       scores[a][episode] = r
 
+  if (episode + 1) >2500: env.render()
   if (episode + 1) % 100 == 0:  # print info every 100 episodes
     message = f'episode {episode + 1}, '
     sum_reward = 0
@@ -194,6 +224,20 @@ for episode in range(episode_num):
     print(message)
 
 env.close()
+
+#import matplotlib.pyplot as plt
+## training finishes, plot reward
+#fig, ax = plt.subplots()
+#x = np.range(1, args.episode_num + 1)
+#for agent_id, reward in scores.items():
+#  ax.plot(x, reward, label=agent_id)
+#  ax.plot(x, get_running_reward(reward))
+#ax.legend()
+#ax.set_xlabel('episode')
+#ax.set_ylabel('reward')
+#title = f'training result of maddpg solve {args.env_name}'
+#ax.set_title(title)
+#plt.savefig(os.path.join(result_dir, title))
 
 from bokeh.plotting import figure, show
 for a in scores:
