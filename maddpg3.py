@@ -13,21 +13,35 @@ gamma = 0.99
 tau   = 0.005 # for target network soft update
 
 class ReplayBuffer():
-  def __init__(self, size=50000):
-    self.memory = collections.deque(maxlen=size)
+  def __init__(self, obs_dim, act_dim, length=50000):
+    self.states  = np.zeros((length, obs_dim))
+    self.actions = np.zeros((length, act_dim))
+    self.rewards = np.zeros(length)
+    self.nstates = np.zeros((length, obs_dim))
+    self.dones   = np.zeros(length, dtype=bool)
 
-  def __len__(self): return len(self.memory)
+    self.idx  = 0
+    self.size = length
 
-  def store(self, experiance):
-    self.memory.append(experiance)
+  def __len__(self): return self.idx
+
+  def store(self, obs, action, reward, next_obs, done):
+    idx = self.idx % self.size
+    self.idx += 1
+
+    self.states[idx]  = obs
+    self.actions[idx] = action
+    self.rewards[idx] = reward
+    self.nstates[idx] = next_obs
+    self.dones[idx] = done
 
   def sample(self, batch_size):
-    batch = random.sample(self.memory, batch_size)
-    states  = torch.tensor([x[0] for x in batch], dtype=torch.float)
-    actions = torch.tensor([x[1] for x in batch]).float()
-    rewards = torch.tensor([[x[2]] for x in batch]).float()
-    nstates = torch.tensor([x[3] for x in batch], dtype=torch.float)
-    dones   = torch.tensor([[1-x[4]] for x in batch])
+    indices = np.random.choice(self.size, size=batch_size, replace=False)
+    states  = torch.tensor( self.states[indices] , dtype=torch.float).float()
+    actions = torch.tensor( self.actions[indices], dtype=torch.float).float()
+    rewards = torch.tensor( self.rewards[indices], dtype=torch.float).float()
+    nstates = torch.tensor( self.nstates[indices], dtype=torch.float).float()
+    dones   = torch.tensor( self.dones[indices] ).float()
     return states, actions, rewards, nstates, dones
 
 class Actor(nn.Module):
@@ -104,7 +118,7 @@ class MADDPG():
       in_dims  = env.observation_space(a).shape[0] 
       out_dims = env.action_space(a).n 
       self.agents[a] = DDPG_Agent(in_dims, out_dims)
-      self.memory[a] = ReplayBuffer()
+      self.memory[a] = ReplayBuffer(in_dims, out_dims, 50000)
 
     # Using one Central critic
     critic_input = sum(env.observation_space(a).shape[0]+  
@@ -129,8 +143,8 @@ class MADDPG():
       _nstate = next_obs[agent_id]
       _done   = done[agent_id]
       _action = np.zeros(self.env.action_space(agent_id).n)
-      _action [action[agent_id]] = 1  # convert action to one-hot encoding
-      self.memory[agent_id].store((_state, _action, _reward, _nstate, _done))
+      _action[action[agent_id]] = 1  # convert action to one-hot encoding
+      self.memory[agent_id].store(_state, _action, _reward, _nstate, _done)
 
   def sample(self, batch_size):
     # NOTE that in MADDPG, we need the obs and actions of all agents
@@ -153,13 +167,12 @@ class MADDPG():
   def train(self, batch_size=32):
     for a in self.agents:  
       if(len(self.memory[a]) >= 2000):
-        #print("learning")
-        #states, actions, rewards, nstates, dones = self.agent_memorys[a].sample(32)
         states, actions, rewards, nstates, dones, next_actions = self.sample(32)
-        q = self.critic( list(states.values()), list(actions.values()) )
-        q_targ = self.targ_critic(list(nstates.values()), list(next_actions.values()) )
+        q = self.critic( list(states.values()), list(actions.values()) ).squeeze()
+        q_targ = self.targ_critic(list(nstates.values()), list(next_actions.values()) ).squeeze()
 
-        q_targ = rewards[a] + gamma*q_targ * dones[a]
+        #print(rewards[a].shape, ( q_targ).shape , dones[a].shape)
+        q_targ = rewards[a] + gamma*q_targ * (1-dones[a])
         critic_loss = F.smooth_l1_loss(q, q_targ, reduction='mean')
 
         self.critic.optimizer.zero_grad()
@@ -188,26 +201,15 @@ class MADDPG():
     for param_targ, param in zip(target.parameters(), network.parameters()):
       param_targ.data.copy_(param_targ.data * (1.0 - tau) + param.data * tau)
 
-
 #https://github.com/Git-123-Hub/maddpg-pettingzoo-pytorch
 env = simple_adversary_v2.parallel_env(max_cycles=25)
-
 env.reset()
 AGENT = MADDPG(env)
 
-#episode_num = 30000
-episode_num = 3000
+episode_num = 3000 # 30000
 num_agents = env.num_agents
-print( num_agents, "number of agents")
+#print( num_agents, "number of agents")
 scores = {agent: np.zeros(episode_num) for agent in env.agents} # reward of each episode of each agent
-
-steps = 0  # global step counter
-for episode in range(episode_num):
-  obs = env.reset()
-num_agents = env.num_agents
-print( num_agents, "number of agents")
-scores = {agent: np.zeros(episode_num) for agent in env.agents} # reward of each episode of each agent
-
 steps = 0  # global step counter
 for episode in range(episode_num):
   obs = env.reset()
@@ -243,7 +245,8 @@ for episode in range(episode_num):
 env.close()
 
 from bokeh.plotting import figure, show
-for a in scores:
-  p = figure(title="TODO", x_axis_label="Episodes", y_axis_label="Scores")
-  p.line(np.arange(len(scores[a])), scores[a],  legend_label=str(a),  line_width=2)
+p = figure(title="TODO", x_axis_label="Episodes", y_axis_label="Scores")
+p.line(np.arange(len(scores["adversary_0"])), scores["adversary_0"],  legend_label="adversary_0", line_color="red", line_width=1)
+p.line(np.arange(len(scores["agent_1"])), scores["agent_1"],  legend_label="agent_1", line_color="blue", line_width=2)
+p.line(np.arange(len(scores["agent_0"])), scores["agent_0"],  legend_label="agent_0", line_color="green", line_width=1)
 show(p) 
