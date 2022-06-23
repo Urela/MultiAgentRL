@@ -9,6 +9,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+"""
+Decentrilized critics - evey agent has its own critic but the critics all observes
+                        actions and observations from all agents 
+"""
+
 gamma = 0.99
 tau   = 0.005 # for target network soft update
 
