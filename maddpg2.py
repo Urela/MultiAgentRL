@@ -8,59 +8,58 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-
 """
-Decentrilized critics - evey agent has its own critic but the critics all observes
-                        actions and observations from all agents 
+Decentrilized critics - Each agents has its own critic that observes 
+                        actions and observations from all the agents 
 """
 
+device = "cpu"
 gamma = 0.99
 tau   = 0.005 # for target network soft update
 
 class ReplayBuffer():
-  def __init__(self, size=50000):
-    self.memory = collections.deque(maxlen=size)
+  def __init__(self, obs_dim, act_dim, length=50000):
+    self.states  = np.zeros((length, obs_dim))
+    self.actions = np.zeros((length, act_dim))
+    self.rewards = np.zeros(length)
+    self.nstates = np.zeros((length, obs_dim))
+    self.dones   = np.zeros(length, dtype=bool)
+    self.size = length
+    self.idx  = 0
 
-  def __len__(self): return len(self.memory)
+  def __len__(self): return self.idx
 
-  def store(self, experiance):
-    self.memory.append(experiance)
+  def store(self, obs, action, reward, next_obs, done):
+    idx = self.idx % self.size
+    self.idx += 1
+
+    self.states[idx]  = obs
+    self.actions[idx] = action
+    self.rewards[idx] = reward
+    self.nstates[idx] = next_obs
+    self.dones[idx] = done
 
   def sample(self, batch_size):
-    batch = random.sample(self.memory, batch_size)
-    states  = torch.tensor([x[0] for x in batch], dtype=torch.float)
-    actions = torch.tensor([x[1] for x in batch]).float()
-    rewards = torch.tensor([[x[2]] for x in batch]).float()
-    nstates = torch.tensor([x[3] for x in batch], dtype=torch.float)
-    dones   = torch.tensor([[1-x[4]] for x in batch])
+    indices = np.random.choice(self.size, size=batch_size, replace=False)
+    states  = torch.tensor( self.states[indices] , dtype=torch.float).to(device)
+    actions = torch.tensor( self.actions[indices], dtype=torch.float).to(device)
+    rewards = torch.tensor( self.rewards[indices], dtype=torch.float).to(device)
+    nstates = torch.tensor( self.nstates[indices], dtype=torch.float).to(device)
+    dones   = torch.tensor( self.dones[indices] ).float()
     return states, actions, rewards, nstates, dones
 
 class Actor(nn.Module):
   def __init__(self, in_dims, out_dims, lr=5e-4):
     super(Actor, self).__init__()
-    #self.fc1 = nn.Linear(in_dims, 64)
-    #self.fc2 = nn.Linear(64, 64)
-    #self.fc3 = nn.Linear(64, out_dims)
-    self.net = nn.Sequential(
-        nn.Linear(in_dims, 64), nn.ReLU(),
-        nn.Linear(64, 64),      nn.ReLU(),
-        nn.Linear(64, out_dims),
-    ).apply(self.init)
+    self.fc1 = nn.Linear(in_dims, 64)
+    self.fc2 = nn.Linear(64, 64)
+    self.fc3 = nn.Linear(64, out_dims)
     self.optimizer = optim.Adam(self.parameters(), lr=lr)
 
-  @staticmethod
-  def init(m):
-    """init parameter of the module"""
-    gain = nn.init.calculate_gain('relu')
-    if isinstance(m, nn.Linear):
-      torch.nn.init.xavier_uniform_(m.weight, gain=gain)
-      m.bias.data.fill_(0.01)
-
   def forward(self, x):
-    #x = F.relu(self.fc1(x))
-    #x = F.relu(self.fc2(x))
-    #x = torch.tanh(self.fc3(x))
-    x = self.net(x)
+    x = F.relu(self.fc1(x))
+    x = F.relu(self.fc2(x))
+    x = torch.tanh(self.fc3(x))
     return x
 
 class Critic(nn.Module):
@@ -69,27 +68,13 @@ class Critic(nn.Module):
     self.fc1 = nn.Linear(in_dims, 64)
     self.fc2 = nn.Linear(64, 64)
     self.fc3 = nn.Linear(64, 1)
-    self.net = nn.Sequential(
-        nn.Linear(in_dims, 64), nn.ReLU(),
-        nn.Linear(64, 64),      nn.ReLU(),
-        nn.Linear(64, 1),
-    ).apply(self.init)
     self.optimizer = optim.Adam(self.parameters(), lr=lr)
 
-  @staticmethod
-  def init(m):
-    """init parameter of the module"""
-    gain = nn.init.calculate_gain('relu')
-    if isinstance(m, nn.Linear):
-      torch.nn.init.xavier_uniform_(m.weight, gain=gain)
-      m.bias.data.fill_(0.01)
-
   def forward(self, o, a):
-    x = torch.cat([o, a], dim=1)
-    #x = F.relu(self.fc1(x))
-    #x = F.relu(self.fc2(x))
-    #x = self.fc3(x)
-    x = self.net(x)
+    x = torch.cat(o+a, dim=1) # adding lists concates them together
+    x = F.relu(self.fc1(x))
+    x = F.relu(self.fc2(x))
+    x = self.fc3(x)
     return x
 
 class DDPG_Agent():
@@ -106,51 +91,70 @@ class DDPG_Agent():
 
 class MADDPG():
   def __init__(self, env):
-    self.main_memory = ReplayBuffer()
+    self.env = env
     self.agents = {}
-    self.agent_memorys = {}
-    #critic_in = sum(env.observation_space(a).shape[0]+env.action_space(a).n for a in env.agents) # gloabal obs+action
+    self.memory = {}
+    critic_in = sum(env.observation_space(a).shape[0]+env.action_space(a).n for a in env.agents) # gloabal obs+action
     for a in env.agents:
       in_dims  = env.observation_space(a).shape[0] 
       out_dims = env.action_space(a).n 
-      self.agents[a] = DDPG_Agent(in_dims, out_dims, in_dims+out_dims)
-      self.agent_memorys[a] = ReplayBuffer()
+      self.agents[a] = DDPG_Agent(in_dims, out_dims, critic_in)
+      self.memory[a] = ReplayBuffer(in_dims, out_dims, 50000)
 
   def get_action(self, obs):
     actions = {}
     for i, a in enumerate(self.agents):  # each agent select action according to their obs
       state = torch.from_numpy(obs[a])
-      out = self.agents[a].actor(state)  # torch.Size([1, action_size])
-      #out = F.gumbel_softmax(out, hard=True)  ##?????
-      actions[a] = out.argmax().item()
+      action = self.agents[a].actor(state)  # torch.Size([1, action_size])
+      actions[a] = action.argmax().item()
     return actions
 
-  def train(self):
+  def store(self, obs, action, reward, next_obs, done):
+    for agent_id in obs.keys():
+      _state  = obs[agent_id]
+      _reward = reward[agent_id]
+      _nstate = next_obs[agent_id]
+      _done   = done[agent_id]
+      _action = np.zeros(self.env.action_space(agent_id).n)
+      _action[action[agent_id]] = 1  # convert action to one-hot encoding
+      self.memory[agent_id].store(_state, _action, _reward, _nstate, _done)
+
+  def sample(self, batch_size):
+    # NOTE that in MADDPG, we need the obs and actions of all agents
+    # but only the reward and done of the current agent is needed in the calculation
+    states, actions, rewards, nstates, dones = {}, {}, {}, {}, {}
+    next_actions = {}
+    for agent_id, buffer in self.memory.items():
+      o, a, r, n_o, d = buffer.sample(batch_size)
+      states[agent_id] = o
+      actions[agent_id] = a
+      rewards[agent_id] = r
+      nstates[agent_id] = n_o
+      dones[agent_id] = d
+
+      # calculate next_action using target_network and next_state
+      next_actions[agent_id] = self.agents[agent_id].targ_actor(n_o)
+
+    return states, actions, rewards, nstates, dones, next_actions
+
+  def train(self, batch_size=32):
     for a in self.agents:  
-      if(len(self.agent_memorys[a]) >= 2000):
-        #print("learning")
-        states, actions, rewards, nstates, dones = self.agent_memorys[a].sample(32)
+      if(len(self.memory[a]) >= 2000):
+        states, actions, rewards, nstates, dones, next_actions = self.sample(32)
+        q = self.agents[a].critic( list(states.values()), list(actions.values()) ).squeeze()
+        q_targ = self.agents[a].targ_critic(list(nstates.values()), list(next_actions.values()) ).squeeze()
 
-        q = self.agents[a].critic(states, actions)
-        a_targ = self.agents[a].targ_actor(nstates)
-        #a_targ = F.gumbel_softmax(a_targ, hard=True)  ##?????
-
-        q_targ = self.agents[a].targ_critic(nstates, a_targ)
-        q_targ = rewards + gamma*q_targ * dones
+        q_targ = rewards[a] + gamma*q_targ * (1-dones[a])
         critic_loss = F.smooth_l1_loss(q, q_targ, reduction='mean')
 
         self.agents[a].critic.optimizer.zero_grad()
         critic_loss.backward()
         self.agents[a].critic.optimizer.step()
 
-        a_pred = self.agents[a].actor(states)
-        actor_loss = -self.agents[a].critic(states, a_pred).mean()
-
-        #out = self.agents[a].actor(states)
-        #a_pred = F.gumbel_softmax(out, hard=True)  ##?????
-        #actor_loss = -self.agents[a].critic(states, a_pred).mean()
-        #actor_loss_pse = torch.pow(out, 2).mean()   #?????
-        #actor_loss = (actor_loss + 1e-3 * actor_loss_pse) #???
+        out = self.agents[a].actor(states[a])
+        actor_loss = -self.agents[a].critic( list(states.values()), list(actions.values()) ).mean()
+        actor_loss_pse = torch.pow(out, 2).mean()
+        actor_loss = actor_loss + 1e-3 * actor_loss_pse
 
         self.agents[a].actor.optimizer.zero_grad()
         actor_loss.backward()
@@ -172,24 +176,14 @@ class MADDPG():
 
 #https://github.com/Git-123-Hub/maddpg-pettingzoo-pytorch
 env = simple_adversary_v2.parallel_env(max_cycles=25)
-
 env.reset()
 AGENT = MADDPG(env)
 
-#episode_num = 30000
-episode_num = 3000
+steps = 0          # global step counter
+episode_num = 3000 # 30000
 num_agents = env.num_agents
-print( num_agents, "number of agents")
-scores = {agent: np.zeros(episode_num) for agent in env.agents} # reward of each episode of each agent
 
-steps = 0  # global step counter
-for episode in range(episode_num):
-  obs = env.reset()
-num_agents = env.num_agents
-print( num_agents, "number of agents")
 scores = {agent: np.zeros(episode_num) for agent in env.agents} # reward of each episode of each agent
-
-steps = 0  # global step counter
 for episode in range(episode_num):
   obs = env.reset()
   agent_score = {a: 0 for a in env.agents} # agent reward of the current episode
@@ -199,17 +193,11 @@ for episode in range(episode_num):
     action = AGENT.get_action(obs) 
     #env.render()
     next_obs, reward, done, info = env.step(action)
-    for agent_id in obs.keys():
-      _state  = obs[agent_id]
-      _reward = reward[agent_id]
-      _nstate = next_obs[agent_id]
-      _done   = done[agent_id]
-      _action = np.zeros(env.action_space(agent_id).n)
-      _action [action[agent_id]] = 1  # convert action to one-hot encoding
-      AGENT.agent_memorys[agent_id].store((_state, _action, _reward, _nstate, _done))
+    AGENT.store(obs, action, reward, next_obs, done)
 
     obs = next_obs
     AGENT.train()
+
 
     for a, r in reward.items():  # update episodic reward
       agent_score[a] += r
@@ -218,7 +206,6 @@ for episode in range(episode_num):
   for a, r in agent_score.items():  # record reward
       scores[a][episode] = r
 
-  if (episode + 1) >2500: env.render()
   if (episode + 1) % 100 == 0:  # print info every 100 episodes
     message = f'episode {episode + 1}, '
     sum_reward = 0
@@ -230,22 +217,9 @@ for episode in range(episode_num):
 
 env.close()
 
-#import matplotlib.pyplot as plt
-## training finishes, plot reward
-#fig, ax = plt.subplots()
-#x = np.range(1, args.episode_num + 1)
-#for agent_id, reward in scores.items():
-#  ax.plot(x, reward, label=agent_id)
-#  ax.plot(x, get_running_reward(reward))
-#ax.legend()
-#ax.set_xlabel('episode')
-#ax.set_ylabel('reward')
-#title = f'training result of maddpg solve {args.env_name}'
-#ax.set_title(title)
-#plt.savefig(os.path.join(result_dir, title))
-
 from bokeh.plotting import figure, show
-for a in scores:
-  p = figure(title="TODO", x_axis_label="Episodes", y_axis_label="Scores")
-  p.line(np.arange(len(scores[a])), scores[a],  legend_label=str(a),  line_width=2)
+p = figure(title="TODO", x_axis_label="Episodes", y_axis_label="Scores")
+p.line(np.arange(len(scores["adversary_0"])), scores["adversary_0"],  legend_label="adversary_0", line_color="red", line_width=1)
+p.line(np.arange(len(scores["agent_1"])), scores["agent_1"],  legend_label="agent_1", line_color="blue", line_width=2)
+p.line(np.arange(len(scores["agent_0"])), scores["agent_0"],  legend_label="agent_0", line_color="green", line_width=1)
 show(p) 

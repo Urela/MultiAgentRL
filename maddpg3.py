@@ -13,6 +13,7 @@ import torch.optim as optim
 Centrilized critics - One centralized critic that observes 
                       actions and observations from all agents 
 """
+device = "cpu"
 
 gamma = 0.99
 tau   = 0.005 # for target network soft update
@@ -24,9 +25,8 @@ class ReplayBuffer():
     self.rewards = np.zeros(length)
     self.nstates = np.zeros((length, obs_dim))
     self.dones   = np.zeros(length, dtype=bool)
-
-    self.idx  = 0
     self.size = length
+    self.idx  = 0
 
   def __len__(self): return self.idx
 
@@ -42,10 +42,10 @@ class ReplayBuffer():
 
   def sample(self, batch_size):
     indices = np.random.choice(self.size, size=batch_size, replace=False)
-    states  = torch.tensor( self.states[indices] , dtype=torch.float).float()
-    actions = torch.tensor( self.actions[indices], dtype=torch.float).float()
-    rewards = torch.tensor( self.rewards[indices], dtype=torch.float).float()
-    nstates = torch.tensor( self.nstates[indices], dtype=torch.float).float()
+    states  = torch.tensor( self.states[indices] , dtype=torch.float).to(device)
+    actions = torch.tensor( self.actions[indices], dtype=torch.float).to(device)
+    rewards = torch.tensor( self.rewards[indices], dtype=torch.float).to(device)
+    nstates = torch.tensor( self.nstates[indices], dtype=torch.float).to(device)
     dones   = torch.tensor( self.dones[indices] ).float()
     return states, actions, rewards, nstates, dones
 
@@ -55,26 +55,12 @@ class Actor(nn.Module):
     self.fc1 = nn.Linear(in_dims, 64)
     self.fc2 = nn.Linear(64, 64)
     self.fc3 = nn.Linear(64, out_dims)
-    #self.net = nn.Sequential(
-    #    nn.Linear(in_dims, 64), nn.ReLU(),
-    #    nn.Linear(64, 64),      nn.ReLU(),
-    #    nn.Linear(64, out_dims),
-    #).apply(self.init)
     self.optimizer = optim.Adam(self.parameters(), lr=lr)
-
-  @staticmethod
-  def init(m):
-    """init parameter of the module"""
-    gain = nn.init.calculate_gain('relu')
-    if isinstance(m, nn.Linear):
-      torch.nn.init.xavier_uniform_(m.weight, gain=gain)
-      m.bias.data.fill_(0.01)
 
   def forward(self, x):
     x = F.relu(self.fc1(x))
     x = F.relu(self.fc2(x))
     x = torch.tanh(self.fc3(x))
-    #x = self.net(x)
     return x
 
 class Critic(nn.Module):
@@ -83,34 +69,19 @@ class Critic(nn.Module):
     self.fc1 = nn.Linear(in_dims, 64)
     self.fc2 = nn.Linear(64, 64)
     self.fc3 = nn.Linear(64, 1)
-    #self.net = nn.Sequential(
-    #    nn.Linear(in_dims, 64), nn.ReLU(),
-    #    nn.Linear(64, 64),      nn.ReLU(),
-    #    nn.Linear(64, 1),
-    #).apply(self.init)
     self.optimizer = optim.Adam(self.parameters(), lr=lr)
 
-  @staticmethod
-  def init(m):
-    """init parameter of the module"""
-    gain = nn.init.calculate_gain('relu')
-    if isinstance(m, nn.Linear):
-      torch.nn.init.xavier_uniform_(m.weight, gain=gain)
-      m.bias.data.fill_(0.01)
-
   def forward(self, o, a):
-    #x = torch.cat([o,a], dim=1) 
     x = torch.cat(o+a, dim=1) # adding lists concates them together
     x = F.relu(self.fc1(x))
     x = F.relu(self.fc2(x))
     x = self.fc3(x)
-    #x = self.net(x)
     return x
 
 class DDPG_Agent():
   def __init__(self, in_dims, out_dims):
-    self.actor  = Actor(in_dims,  out_dims).to('cpu')
-    self.targ_actor  = Actor(in_dims,  out_dims).to('cpu') 
+    self.actor  = Actor(in_dims,  out_dims).to(device)
+    self.targ_actor  = Actor(in_dims,  out_dims).to(device) 
     # intialize the target to match its behaviour network
     self.targ_actor.load_state_dict(self.actor.state_dict()) 
 
@@ -128,8 +99,8 @@ class MADDPG():
     # Using one Central critic
     critic_input = sum(env.observation_space(a).shape[0]+  
                              env.action_space(a).n for a in env.agents) # gloabal obs+action
-    self.critic      = Critic(critic_input).to('cpu')
-    self.targ_critic = Critic(critic_input).to('cpu') # target critic
+    self.critic      = Critic(critic_input).to(device)
+    self.targ_critic = Critic(critic_input).to(device) # target critic
     # intialize the target to match its behaviour network
     self.targ_critic.load_state_dict(self.critic.state_dict())
 
@@ -176,7 +147,6 @@ class MADDPG():
         q = self.critic( list(states.values()), list(actions.values()) ).squeeze()
         q_targ = self.targ_critic(list(nstates.values()), list(next_actions.values()) ).squeeze()
 
-        #print(rewards[a].shape, ( q_targ).shape , dones[a].shape)
         q_targ = rewards[a] + gamma*q_targ * (1-dones[a])
         critic_loss = F.smooth_l1_loss(q, q_targ, reduction='mean')
 
@@ -211,11 +181,11 @@ env = simple_adversary_v2.parallel_env(max_cycles=25)
 env.reset()
 AGENT = MADDPG(env)
 
+steps = 0          # global step counter
 episode_num = 3000 # 30000
 num_agents = env.num_agents
-#print( num_agents, "number of agents")
+
 scores = {agent: np.zeros(episode_num) for agent in env.agents} # reward of each episode of each agent
-steps = 0  # global step counter
 for episode in range(episode_num):
   obs = env.reset()
   agent_score = {a: 0 for a in env.agents} # agent reward of the current episode
@@ -230,6 +200,7 @@ for episode in range(episode_num):
     obs = next_obs
     AGENT.train()
 
+
     for a, r in reward.items():  # update episodic reward
       agent_score[a] += r
 
@@ -237,7 +208,6 @@ for episode in range(episode_num):
   for a, r in agent_score.items():  # record reward
       scores[a][episode] = r
 
-  #if (episode + 1) >2500: env.render()
   if (episode + 1) % 100 == 0:  # print info every 100 episodes
     message = f'episode {episode + 1}, '
     sum_reward = 0
