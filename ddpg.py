@@ -7,25 +7,39 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+device = 'cpu'
 gamma = 0.99
 tau   = 0.005 # for target network soft update
 
-class ReplayBuffer:
-  def __init__(self, size=50000):
-    self.memory = collections.deque(maxlen=size)
+class ReplayBuffer():
+  def __init__(self, obs_dim, act_dim, length=50000):
+    self.states  = np.zeros((length, obs_dim))
+    self.actions = np.zeros((length, act_dim))
+    self.rewards = np.zeros(length)
+    self.nstates = np.zeros((length, obs_dim))
+    self.dones   = np.zeros(length, dtype=bool)
+    self.size = length
+    self.idx  = 0
 
-  def __len__(self): return len(self.memory)
+  def __len__(self): return self.idx
 
-  def store(self, experiance):
-    self.memory.append(experiance)
+  def store(self, obs, action, reward, next_obs, done):
+    idx = self.idx % self.size
+    self.idx += 1
+
+    self.states[idx]  = obs
+    self.actions[idx] = action
+    self.rewards[idx] = reward
+    self.nstates[idx] = next_obs
+    self.dones[idx] = done
 
   def sample(self, batch_size):
-    batch = random.sample(self.memory, batch_size)
-    states  = torch.tensor([x[0] for x in batch], dtype=torch.float)
-    actions = torch.tensor([[x[1]] for x in batch]).float()
-    rewards = torch.tensor([[x[2]] for x in batch]).float()
-    nstates = torch.tensor([x[3] for x in batch], dtype=torch.float)
-    dones   = torch.tensor([1-x[4] for x in batch])
+    indices = np.random.choice(self.size, size=batch_size, replace=False)
+    states  = torch.tensor( self.states[indices] , dtype=torch.float).to(device)
+    actions = torch.tensor( self.actions[indices], dtype=torch.float).to(device)
+    rewards = torch.tensor( self.rewards[indices], dtype=torch.float).to(device)
+    nstates = torch.tensor( self.nstates[indices], dtype=torch.float).to(device)
+    dones   = torch.tensor( self.dones[indices] ).float()
     return states, actions, rewards, nstates, dones
 
 class Actor(nn.Module):
@@ -52,6 +66,7 @@ class Critic(nn.Module):
 
   def forward(self, o, a):
     x = torch.cat([o, a], dim=1)
+    #x = torch.cat(o+a, dim=1)
     x = F.relu(self.fc1(x))
     x = F.relu(self.fc2(x))
     x = self.fc3(x)
@@ -60,19 +75,19 @@ class Critic(nn.Module):
 class DDPG():
   def __init__(self, in_dims, out_dims):
     self.out_dims = out_dims
-    self.memory = ReplayBuffer()
+    self.memory = ReplayBuffer(in_dims, out_dims)
 
-    self.actor  = Actor(in_dims,  out_dims).to('cpu')
-    self.critic = Critic(in_dims, out_dims).to('cpu')
-    self.targ_actor  = Actor(in_dims,  out_dims).to('cpu') # target critic
-    self.targ_critic = Critic(in_dims, out_dims).to('cpu') # target actor
+    self.actor  = Actor(in_dims,  out_dims).to(device)
+    self.critic = Critic(in_dims, out_dims).to(device)
+    self.targ_actor  = Actor(in_dims,  out_dims).to(device) # target critic
+    self.targ_critic = Critic(in_dims, out_dims).to(device) # target actor
 
     # intialize the targets to match their networks
     self.targ_critic.load_state_dict(self.critic.state_dict())
     self.targ_actor.load_state_dict(self.actor.state_dict())
 
-  def store(self, exp):
-    self.memory.store((exp))
+  def store(self, obs,action,reward,_obs,done):
+    self.memory.store(obs,action,reward,_obs,done)
 
   def get_action(self, obs):
     action = self.actor(torch.from_numpy(obs).float()) 
@@ -88,14 +103,12 @@ class DDPG():
   def train(self):
     if(len(self.memory) >= 2000):
       for i in range(10):
-
         states, actions, rewards, nstates, dones = self.memory.sample(32)
-
-        q = self.critic(states, actions)
+        q = self.critic(states, actions).squeeze()
         a_targ = self.targ_actor(nstates)
-        q_targ = self.targ_critic(nstates, a_targ)
-        q_targ = rewards + gamma*q_targ * dones
-        critic_loss = F.smooth_l1_loss(q, q_targ.detach() )
+        q_targ = self.targ_critic(nstates, a_targ).squeeze()
+        q_targ = rewards + gamma*q_targ * (1-dones)
+        critic_loss = F.smooth_l1_loss(q, q_targ )
 
         self.critic.optimizer.zero_grad()
         critic_loss.backward()
@@ -124,10 +137,6 @@ env = gym.make('Pendulum-v1')
 env = gym.wrappers.RecordEpisodeStatistics(env)
 agent = DDPG(env.observation_space.shape[0], env.action_space.shape[0])
 
-score = 0.0
-print_interval = 1
-
-
 scores = []
 for epi in range(100):
   obs = env.reset()
@@ -135,8 +144,7 @@ for epi in range(100):
 
     action = agent.get_action(obs)
     _obs, reward, done, info = env.step([action])
-    agent.store((obs,action,reward,_obs,done))
-    score +=reward
+    agent.store(obs,action,reward,_obs,done)
     obs = _obs
     agent.train()
   
@@ -145,13 +153,10 @@ for epi in range(100):
       #avg_scores = np.mean(scores[-100:]) # moving average of last 100 episodes
       print(f"Episode {epi}, Return: {info['episode']['r']}")
       break
-
-  
 env.close()
 
 y = scores 
 x = np.arange(len(y))
-
 from bokeh.plotting import figure, show
 p = figure(title="TODO", x_axis_label="Episodes", y_axis_label="Scores")
 p.line(x, y,  legend_label="Scores", line_color="blue", line_width=2)
